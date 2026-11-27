@@ -24,23 +24,29 @@ window.SB_VIEWS["publish-view"] = {
       <div class="panel">
         <h3>正式发布</h3>
         <table>
-          <thead><tr><th>ID</th><th>屏幕</th><th>清单</th><th>时段</th><th>版本</th><th>摘要</th></tr></thead>
+          <thead><tr><th>ID</th><th>屏幕</th><th>清单</th><th>时段</th><th>版本</th><th>状态</th><th>摘要</th></tr></thead>
           <tbody>
             <tr v-for="p in official" :key="p.id">
               <td>{{ p.id }}</td><td>{{ p.screen_code }}</td><td>{{ p.playlist_code }}</td>
-              <td>{{ p.window_code }}</td><td>v{{ p.version }}</td><td>{{ p.summary }}</td>
+              <td>{{ p.window_code }}</td><td>v{{ p.version }}</td>
+              <td><span class="badge" :class="p.on_screen?'':'warn'">{{ p.status_label }}</span></td>
+              <td>{{ p.summary }}</td>
             </tr>
+            <tr v-if="!official.length"><td colspan="7">正式区空白：无正式已上屏发布</td></tr>
           </tbody>
         </table>
       </div>
     </div>
     <div class="panel">
-      <h3>影子草案</h3>
+      <h3>影子草案（未升正·不上屏）</h3>
       <table>
-        <thead><tr><th>ID</th><th>屏幕</th><th>状态</th><th>摘要</th></tr></thead>
+        <thead><tr><th>ID</th><th>屏幕</th><th>状态</th><th>上屏</th><th>摘要</th></tr></thead>
         <tbody>
           <tr v-for="s in shadows" :key="s.id">
-            <td>{{ s.id }}</td><td>{{ s.screen_code }}</td><td>{{ s.status }}</td><td>{{ s.summary }}</td>
+            <td>{{ s.id }}</td><td>{{ s.screen_code }}</td>
+            <td><span class="badge" :class="s.status==='open'?'warn':''">{{ s.status_label }}</span></td>
+            <td>{{ s.on_screen ? '是' : '否' }}</td>
+            <td>{{ s.summary }}</td>
           </tr>
         </tbody>
       </table>

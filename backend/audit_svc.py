@@ -11,21 +11,32 @@ from db import connect, rows_to_list
 router = APIRouter(prefix="/api/audit", tags=["audit"])
 
 
+def write_audit_tx(conn, actor: str, action: str, payload: dict) -> None:
+    """同事务审计写入：调用方持连接与事务，落账与业务同事务提交。"""
+    conn.execute(
+        "INSERT INTO audit_log(actor,action,payload,created_at) VALUES(?,?,?,?)",
+        (actor, action, json.dumps(payload, ensure_ascii=False), time.time()),
+    )
+
+
+def write_history_tx(conn, entity_kind: str, entity_id: int, action: str, detail: str, actor: str) -> int:
+    """同事务历史写入：返回认账/变更行号，落账与业务同事务提交。"""
+    cur = conn.execute(
+        "INSERT INTO change_history(entity_kind,entity_id,action,detail,actor,created_at) VALUES(?,?,?,?,?,?)",
+        (entity_kind, entity_id, action, detail, actor, time.time()),
+    )
+    return cur.lastrowid
+
+
 def write_audit(actor: str, action: str, payload: dict) -> None:
     with connect() as conn:
-        conn.execute(
-            "INSERT INTO audit_log(actor,action,payload,created_at) VALUES(?,?,?,?)",
-            (actor, action, json.dumps(payload, ensure_ascii=False), time.time()),
-        )
+        write_audit_tx(conn, actor, action, payload)
         conn.commit()
 
 
 def write_history(entity_kind: str, entity_id: int, action: str, detail: str, actor: str) -> None:
     with connect() as conn:
-        conn.execute(
-            "INSERT INTO change_history(entity_kind,entity_id,action,detail,actor,created_at) VALUES(?,?,?,?,?,?)",
-            (entity_kind, entity_id, action, detail, actor, time.time()),
-        )
+        write_history_tx(conn, entity_kind, entity_id, action, detail, actor)
         conn.commit()
 
 

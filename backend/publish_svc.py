@@ -7,7 +7,9 @@ from fastapi import APIRouter, Header, HTTPException
 from audit_svc import write_audit, write_history
 from auth import current_user, require_writer
 from db import connect, rows_to_list
+from evaluate_svc import eval_recognize_lock_key
 from locks import acquire, release
+from models import PUBLISH_STATUS_LABEL, SHADOW_STATUS_LABEL
 from policies import assert_playlist_ready, assert_screen_online, assert_window_open
 from validators import require_positive_int, require_title
 
@@ -32,6 +34,9 @@ def list_official(authorization: str | None = Header(default=None)):
                 """
             ).fetchall()
         )
+    for r in rows:
+        r["status_label"] = PUBLISH_STATUS_LABEL.get(r["status"], r["status"])
+        r["on_screen"] = r["status"] == "published"
     return {"items": rows}
 
 
@@ -51,6 +56,11 @@ def list_shadows(authorization: str | None = Header(default=None)):
                 """
             ).fetchall()
         )
+    for r in rows:
+        # 防伪：影子永不自认正式、永不自认已上屏，只认「待升正/已升正/已废弃」
+        r["official"] = 0
+        r["on_screen"] = False
+        r["status_label"] = SHADOW_STATUS_LABEL.get(r["status"], r["status"])
     return {"items": rows}
 
 
@@ -77,33 +87,39 @@ def publish_official(body: dict, authorization: str | None = Header(default=None
     summary = require_title(body.get("summary") or "正式发布", "发布摘要")
     layout_id = body.get("layout_id")
     lock_key = f"publish:{screen_id}"
+    mutex_key = eval_recognize_lock_key(screen_id)
     acquire(lock_key, user["username"])
     try:
-        with connect() as conn:
-            _load_refs(conn, screen_id, playlist_id, window_id)
-            prev = conn.execute(
-                "SELECT version FROM publications WHERE screen_id=? AND official=1",
-                (screen_id,),
-            ).fetchone()
-            version = (prev["version"] + 1) if prev else 1
-            conn.execute("DELETE FROM publications WHERE screen_id=? AND official=1", (screen_id,))
-            cur = conn.execute(
-                "INSERT INTO publications(screen_id,playlist_id,window_id,layout_id,version,summary,status,official,published_at,published_by) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (
-                    screen_id,
-                    playlist_id,
-                    window_id,
-                    layout_id,
-                    version,
-                    summary,
-                    "published",
-                    1,
-                    time.time(),
-                    user["username"],
-                ),
-            )
-            pid = cur.lastrowid
-            conn.commit()
+        acquire(mutex_key, user["username"])
+        try:
+            with connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                _load_refs(conn, screen_id, playlist_id, window_id)
+                prev = conn.execute(
+                    "SELECT version FROM publications WHERE screen_id=? AND official=1",
+                    (screen_id,),
+                ).fetchone()
+                version = (prev["version"] + 1) if prev else 1
+                conn.execute("DELETE FROM publications WHERE screen_id=? AND official=1", (screen_id,))
+                cur = conn.execute(
+                    "INSERT INTO publications(screen_id,playlist_id,window_id,layout_id,version,summary,status,official,published_at,published_by) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        screen_id,
+                        playlist_id,
+                        window_id,
+                        layout_id,
+                        version,
+                        summary,
+                        "published",
+                        1,
+                        time.time(),
+                        user["username"],
+                    ),
+                )
+                pid = cur.lastrowid
+                conn.commit()
+        finally:
+            release(mutex_key, user["username"])
         write_history("publication", pid, "publish_official", summary, user["username"])
         write_audit(user["username"], "publish.official", {"id": pid, "version": version})
         return {"id": pid, "version": version, "path": "official"}
@@ -155,38 +171,46 @@ def promote_shadow(shadow_id: int, authorization: str | None = Header(default=No
             raise HTTPException(409, "影子不可升正")
         screen_id = sh["screen_id"]
     lock_key = f"publish:{screen_id}"
+    mutex_key = eval_recognize_lock_key(screen_id)
     acquire(lock_key, user["username"])
     try:
-        with connect() as conn:
-            sh = conn.execute("SELECT * FROM publish_shadows WHERE id=?", (shadow_id,)).fetchone()
-            _load_refs(conn, sh["screen_id"], sh["playlist_id"], sh["window_id"])
-            prev = conn.execute(
-                "SELECT version FROM publications WHERE screen_id=? AND official=1",
-                (sh["screen_id"],),
-            ).fetchone()
-            version = (prev["version"] + 1) if prev else 1
-            conn.execute("DELETE FROM publications WHERE screen_id=? AND official=1", (sh["screen_id"],))
-            cur = conn.execute(
-                "INSERT INTO publications(screen_id,playlist_id,window_id,layout_id,version,summary,status,official,published_at,published_by) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (
-                    sh["screen_id"],
-                    sh["playlist_id"],
-                    sh["window_id"],
-                    sh["layout_id"],
-                    version,
-                    sh["summary"],
-                    "published",
-                    1,
-                    time.time(),
-                    user["username"],
-                ),
-            )
-            pid = cur.lastrowid
-            conn.execute(
-                "UPDATE publish_shadows SET status='promoted' WHERE id=?",
-                (shadow_id,),
-            )
-            conn.commit()
+        acquire(mutex_key, user["username"])
+        try:
+            with connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                sh = conn.execute("SELECT * FROM publish_shadows WHERE id=?", (shadow_id,)).fetchone()
+                if not sh or sh["status"] != "open":
+                    raise HTTPException(409, "影子不可升正")
+                _load_refs(conn, sh["screen_id"], sh["playlist_id"], sh["window_id"])
+                prev = conn.execute(
+                    "SELECT version FROM publications WHERE screen_id=? AND official=1",
+                    (sh["screen_id"],),
+                ).fetchone()
+                version = (prev["version"] + 1) if prev else 1
+                conn.execute("DELETE FROM publications WHERE screen_id=? AND official=1", (sh["screen_id"],))
+                cur = conn.execute(
+                    "INSERT INTO publications(screen_id,playlist_id,window_id,layout_id,version,summary,status,official,published_at,published_by) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        sh["screen_id"],
+                        sh["playlist_id"],
+                        sh["window_id"],
+                        sh["layout_id"],
+                        version,
+                        sh["summary"],
+                        "published",
+                        1,
+                        time.time(),
+                        user["username"],
+                    ),
+                )
+                pid = cur.lastrowid
+                conn.execute(
+                    "UPDATE publish_shadows SET status='promoted' WHERE id=?",
+                    (shadow_id,),
+                )
+                conn.commit()
+        finally:
+            release(mutex_key, user["username"])
         write_history("publication", pid, "promote_shadow", f"升正影子 {shadow_id}", user["username"])
         write_audit(user["username"], "publish.promote", {"shadow_id": shadow_id, "id": pid})
         return {"id": pid, "version": version, "path": "shadow_promote"}

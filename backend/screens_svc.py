@@ -33,11 +33,27 @@ def list_screens(authorization: str | None = Header(default=None)):
             ORDER BY s.id
             """
         ).fetchall()
+        # 上屏真相只联查正式发布；开放影子只进待升正计数，绝不翻绿
+        officials = {
+            r["screen_id"]: r["version"]
+            for r in conn.execute(
+                "SELECT screen_id, version FROM publications WHERE official=1 AND status='published'"
+            ).fetchall()
+        }
+        shadow_counts = {
+            r["screen_id"]: r["c"]
+            for r in conn.execute(
+                "SELECT screen_id, COUNT(*) c FROM publish_shadows WHERE status='open' GROUP BY screen_id"
+            ).fetchall()
+        }
     items = []
     for r in rows:
         d = dict(r)
         d["status_label"] = SCREEN_STATUS_LABEL.get(d["status"], d["status"])
         d["zone_type_label"] = ZONE_TYPE_LABEL.get(d["zone_type"], d["zone_type"])
+        d["official_version"] = officials.get(d["id"])
+        d["on_screen"] = d["official_version"] is not None
+        d["open_shadows"] = shadow_counts.get(d["id"], 0)
         items.append(d)
     return {"items": items}
 
